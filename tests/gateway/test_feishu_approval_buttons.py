@@ -61,12 +61,17 @@ def _make_card_action_data(
     chat_id: str = "oc_12345",
     open_id: str = "ou_user1",
     token: str = "tok_abc",
+    open_message_id: str = "",
 ) -> SimpleNamespace:
-    """Create a mock Feishu card action callback data object."""
+    """Create a mock Feishu card action callback data object.
+
+    ``open_message_id`` mirrors the real callback payload, which carries the card's
+    message id (``om_…``) in ``event.context``; it is distinct from the action ``token``.
+    """
     return SimpleNamespace(
         event=SimpleNamespace(
             token=token,
-            context=SimpleNamespace(open_chat_id=chat_id),
+            context=SimpleNamespace(open_chat_id=chat_id, open_message_id=open_message_id),
             operator=SimpleNamespace(open_id=open_id),
             action=SimpleNamespace(
                 tag="button",
@@ -265,6 +270,61 @@ class TestNonApprovalCardAction:
         mock_handle.assert_called_once()
         event = mock_handle.call_args[0][0]
         assert "/card button" in event.text
+
+    @pytest.mark.asyncio
+    async def test_uses_card_message_id_as_reply_target(self):
+        """The card's own message id is the only valid reply target for the answer."""
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "pick"},
+            token="c-actiontoken",
+            open_message_id="om_cardmessage",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert event.message_id == "om_cardmessage"
+
+    @pytest.mark.asyncio
+    async def test_never_uses_action_token_as_message_id(self):
+        """Without a card message id the event carries none, so the answer is sent to the chat.
+
+        Regression: the action token ("c-…") used to be passed as ``message_id``; Feishu then
+        rejected every reply with 99992354 and the click produced no visible response.
+        """
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(action_value={"custom_action": "pick"}, token="c-actiontoken")
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert not event.message_id
+        assert event.message_id != "c-actiontoken"
+
+
+class TestReplyFallbackCodes:
+    def test_invalid_message_id_error_falls_back_to_new_message(self):
+        """A non-message reply target must degrade to a normal send, not fail twice."""
+        assert 99992354 in feishu_module._FEISHU_REPLY_FALLBACK_CODES
 
 
 # ===========================================================================

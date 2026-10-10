@@ -185,7 +185,8 @@ async def _read_limited_feishu_webhook_body(request: Any, max_bytes: int) -> byt
     return body
 
 
-_FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
+# reply target withdrawn/missing, or the id is not a message id at all → create fallback
+_FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003, 99992354})
 
 # Feishu reactions render as prominent badges, unlike Discord/Telegram's
 # small footer emoji — a success badge on every message would add noise, so
@@ -2454,6 +2455,12 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         context = getattr(event, "context", None)
         chat_id = str(getattr(context, "open_chat_id", "") or "")
+        # The card action ``token`` ("c-…") identifies the action, not the card message, and
+        # Feishu rejects a reply to it (99992354 "not a valid open_message_id"), so the reply
+        # and its plain-text fallback both failed and the click produced no visible answer.
+        # Use the card's real message id when the callback carries it; otherwise leave it unset
+        # so the answer goes out as a regular message in the originating chat.
+        open_message_id = str(getattr(context, "open_message_id", "") or "")
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
         if not chat_id or not open_id:
@@ -2472,7 +2479,7 @@ class FeishuAdapter(BasePlatformAdapter):
         await self._dispatch_synthetic_event(
             text=synthetic_text, message_type=MessageType.COMMAND, chat_id=chat_id,
             sender_id=SimpleNamespace(open_id=open_id, user_id=None, union_id=None), event_chat_type="group",
-            raw_message=data, message_id=token or str(uuid.uuid4()),
+            raw_message=data, message_id=open_message_id,
         )
 
     async def _dispatch_synthetic_event(
